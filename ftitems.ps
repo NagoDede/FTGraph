@@ -1,0 +1,563 @@
+
+%---- Global and constant definitions ---
+/in {72 mul} def % Inches unit inch --> dpi
+/mm {in 25.4 div} def %mm unit mm --> dpi
+/cm {in 2.54 div} def %cm unit cm --> dpî
+
+%------ Project Definition ------
+%---- Page ---
+% Page definition
+/X 21 cm def
+/Y 29.7 cm def
+
+%---- Font ---
+% Standard font size
+/fontsize 1.3 mm def
+% Define the charactere (chr) size
+/chr {fontsize mul} def
+% Set the police
+% Define a courier font, to have fix size
+/Courier-New findfont fontsize scalefont setfont
+%Scale the Courier font to the value set on the stack
+/FontScale 
+    {
+     /Courier-New findfont 
+     exch scalefont 
+     setfont   
+    } def
+
+%---- Internal definitions ---
+% The symbols (and, or,...) are defined on a 26 (length) per 40 (height) size.
+% This allows a scale of the symbols
+/symbol_scale_X 0.4 def
+/symbol_scale_Y 0.4 def
+/inv_symbol_scale_X 1 symbol_scale_X div def
+/inv_symbol_scale_Y 1 symbol_scale_Y div def
+/dws 26 def %default width for symbol (no scale consideration)
+/dws2 {dws 2 div} def
+/dws4 {dws 4 div} def
+/dhs 40 def %default height for symbol
+
+% Used to scale the AND/OR/... symbols. Will be used in the symbol procedure.
+/SetSymbolScale 
+{
+    symbol_scale_X symbol_scale_Y scale
+    currentlinewidth inv_symbol_scale_X mul setlinewidth %keep unchanged the linewidth
+} def
+%------ End of Project Definition ------
+
+%------------------------------------------------------------------------------
+%           Procedures used for string layout
+%------------------------------------------------------------------------------
+% Simple Line Breaking Algorithm
+% See https://www-cdf.fnal.gov/offline/PostScript/BLUEBOOK.PDF
+% This is used to organized the text in the description box of a gate / event.
+% Inputs:
+%   - text
+%   - width of a line (dpi)
+%   - procedure to increment the row
+% Outputs:
+%   - string - Initial text, set on several row in accordance to the procedure 
+%           and line width.
+/wordbreak ( ) def
+/BreakIntoLines {   
+    /proc exch def
+    /linewidth exch def
+    /textstring exch def
+
+    /breakwidth wordbreak stringwidth pop def
+    /curwidth 0 def
+    /lastwordbreak 0 def
+    /startchar 0 def 
+    /restoftext textstring def
+    { 
+        restoftext wordbreak search
+        {
+            /nextword exch def pop
+            /restoftext exch def
+            /wordwidth nextword stringwidth pop def
+            curwidth wordwidth add linewidth gt
+            { 
+                textstring startchar
+                lastwordbreak startchar sub
+                getinterval proc
+                /startchar lastwordbreak def
+                /curwidth wordwidth breakwidth add def 
+            }
+            { 
+                /curwidth curwidth wordwidth add
+                breakwidth add def
+            } ifelse
+            /lastwordbreak lastwordbreak
+            nextword length add 1 add def
+        }
+        { pop exit }
+        ifelse
+    } loop
+    /lastchar textstring length def
+    textstring startchar lastchar startchar sub
+    getinterval proc
+} def
+
+% This procedure positions and shows a string centered on the specified point.
+%  See https://stackoverflow.com/questions/3618194/how-to-determine-string-height-in-postscript
+% Inputs: (string)
+% Usage: 
+%   x y moveto
+%   (string) ccshow
+/hmoveto { 0 rmoveto } def
+/vmoveto { 0 exch rmoveto } def
+/ccshow {
+    dup %-- charpath consumes the string
+
+    gsave
+    newpath %-- else there's a strange line somewhere
+    0 0 moveto
+    true charpath flattenpath pathbbox  % --> x0 y0 x1 y1
+    grestore
+
+    2 index sub -2 div vmoveto %(y1-y0)/-2
+    2 index sub -2 div hmoveto %(x1-x0)/-2
+    
+    neg vmoveto %-> y = y0 - (y1-y0)/2
+    neg hmoveto %-> x = x0 - (x1-x0)/2
+
+    %Stack contains only the string
+    dup % duplicate for pathbox
+    dup %duplicate for stringwidth
+    show %print the text
+
+    %get the box around it
+    true charpath flattenpath pathbbox  % --> x0 y0 x1 y1
+    
+    %add margins
+    1 add 
+    4 1 roll 1 add
+    4 1 roll 1 sub
+    4 1 roll 1 sub
+    4 1 roll
+
+    %compute the height and length
+    % x0 is at the end of the text
+    2 index sub     % --> (txt) x0 y0 x1 H
+    4 1 roll    % --> (txt) H x0 y0 x1
+    2 index sub  % --> (txt)  H x0 y0 L
+    4 2 roll    % --> (txt) y0 L H x0
+    4 index stringwidth pop sub  % --> (txt) y0 L H |x0 - stringw]
+    4 1 roll % --> (txt) |x0 - stringw] y0 L H 
+    rectstroke % --> (txt)
+    pop % --> empty
+} def
+
+/TextHeight { 
+    gsave                                  % save graphic context
+    {                            
+        100 100 moveto                     % move to some point 
+        (HÍpg) true charpath pathbbox      % gets text path bounding box (LLx LLy URx URy)
+        exch pop 3 -1 roll pop             % keeps LLy and URy
+        exch sub                           % URy - LLy
+    }
+    stopped                                % did the last block fail?
+    {
+        pop pop                            % get rid of "stopped" junk
+        currentfont /FontMatrix get 3 get  % gets alternative text height
+    }
+    if
+    grestore                               % restore graphic context
+} bind def
+
+/RowHeight {TextHeight 1.25 mul} def
+%------------- End of String Layout Procedures---------------------------------
+
+%------------------------------------------------------------------------------
+% Draw the description of the gate in a box.
+% Reference (origin of the axes) of the box is the middle of the top border.
+% <ref> <description> --> <dpi>
+% Inputs: 
+%   - reference/name of the item 
+%   - description text
+% Outputs:
+%   - height of the box
+/DescriptionBox 
+{   
+    gsave
+    % Internal parameters
+    /nbrow 3 def % Max number of rows in the box
+    /row_size 26 chr def % Max number of characters by row
+    /width {row_size 2 add} def % Define the size of the box as two charater more than 
+                              %  The max character by row.
+    /height {nbrow 1 add RowHeight mul} def % Define the height of the box
+    
+    % Retrieve Inputs 
+    /description exch def
+    /ref exch def
+
+    % Draw the box
+    % To simplify the placement, set the 0 0 reference at the middle of the top
+    width -2 div height neg translate 
+
+    0 0 width height rectstroke
+
+    %Write the description text
+    % Define internal row counter 
+    /yline nbrow RowHeight mul def
+    % Push data before breakIntoLines
+    description % Description
+    row_size    % Row length
+    {   %Procedure to change row
+        fontsize yline moveto show
+        /yline yline RowHeight sub def
+    }
+    BreakIntoLines 
+
+    %Write the reference text
+    /height 2 RowHeight mul height add  def
+    width 2 div RowHeight neg moveto
+    ref ccshow
+
+    grestore
+
+    height %return height of the box
+} def
+
+%------------------------------------------------------------------------------
+% Symbols definition in accordance to the IEEE-recommended dimensions
+% See https://www10.edacafe.com/book/ASIC/CH09/CH09.1.php 
+% and https://www10.edacafe.com/book/ASIC/CH09/CH09-1.gif
+% Symbols are defined in a 26(w) by 40(h) box. 
+%------------------------------------------------------------------------------
+
+%AND Symbol
+/SymbolAnd
+{   
+    gsave %push graphic state
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 19 moveto
+        0 19 dws2 180 0 arcn
+        dws2 0 lineto
+        dws2 neg 0 lineto
+        dws2 neg 19 lineto
+        0 32 moveto %draw the hook
+        0 8 rlineto
+     stroke
+    grestore
+} def
+
+%Nand symbol
+/SymbolNand
+{   
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 19 moveto
+        0 19 dws2 180 0 arcn
+        dws2 0 lineto
+        dws2 neg 0 lineto
+        dws2 neg 19 lineto
+     stroke
+     0 36 4 0 360 arc stroke
+    grestore
+} def
+
+%OR symbol
+/SymbolOr
+{   
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 10 dws 60 0 arcn %right arc
+        0 -22 dws 60 120 arc  %bottom arc
+        dws2 10 dws 180 120 arcn
+        closepath 
+        0 32 moveto %draw the top hook
+        0 8 rlineto
+        0 0 moveto %bottom hook
+        0 4 lineto
+
+    stroke
+    grestore
+} def
+
+%NOT OR symbol
+/SymbolNor
+{   
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 10 dws 60 0 arcn
+        0 -22 dws 60 120 arc 
+        dws2 10 dws 180 120 arcn
+        closepath 
+        0 32 moveto %draw the hook
+        0 36 4 -90 270 arc  %not symbol
+        0 0 moveto %bottom hook
+        0 4 lineto
+    stroke
+    grestore
+} def
+
+%XOR - exclusive OR - symbol
+/SymbolXor
+{   
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 10 dws 60 0 arcn %draw right top arc clock direction
+        0 -17 dws 60 120 arc %draw bottom arc 
+        0 -5 rmoveto %jump 5 dpi lower
+        0 -22 dws 120 60 arcn %draw the second bottom arc
+        dws neg 5 rmoveto %come back to the original position
+        dws2 10 dws 180 120 arcn %left top arc
+        0 32 moveto %draw the hook
+        0 8 rlineto
+        0 0 moveto %bottom hook
+        0 4 lineto
+    stroke
+    grestore
+} def
+
+%NOT XOR - NOT exclusive OR - symbol
+/SymbolNxor
+{   
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        dws2 neg 10 dws 60 0 arcn %draw right top arc clock direction
+        0 -17 dws 60 120 arc %draw bottom arc 
+        0 -5 rmoveto %jump 5 dpi lower
+        0 -22 dws 120 60 arcn %draw the second bottom arc
+        dws neg 5 rmoveto %come back to the original position
+        dws2 10 dws 180 120 arcn %left top arc
+        0 32 moveto %draw the hook
+        0 36 4 -90 270 arc %draw not ARC 
+        0 0 moveto %bottom hook
+        0 4 lineto
+    stroke
+    grestore
+} def
+
+/SymbolNot
+{
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        %bottom hook
+        0 0 moveto
+        0 5 lineto
+        dws2 5 lineto
+        %%Start the triangle bottom right
+        0 27 lineto
+        %draw circle
+        0 31 4 -90 270 arc
+        %continue the left of the triangle
+        dws2 neg 5 lineto
+        dws2 0 rlineto %close the triangle
+        0 35 moveto %start the top hook
+        0 dhs lineto
+    stroke
+    grestore
+} def
+
+% Draw an hexafon as a symbol of combination.
+% Command:
+% <nbComb>
+% Inputs:
+%   -nbComb: The number of Combiation (i.e. 2 means 2 over x items)
+% Results:
+%        _|_
+%      / 2 \
+%      \__/
+/SymbolComb
+{
+    gsave
+    SetSymbolScale
+    %/dws2 2 mul 0.7 mul - set the fontsize to 70% of the width
+    dws2 2 mul 0.7 mul 1.5 mul round FontScale %set the font size
+    0 dhs neg translate
+    newpath
+        %start from the top
+        0 dhs moveto
+        0 -8 rlineto %top hook
+        dws4 0 rlineto
+        dws4 dws2 neg rlineto
+        dws4 neg dws2 neg rlineto
+        dws2 neg 0 rlineto
+        dws4 neg dws2 rlineto
+        dws4 dws2 rlineto
+        dws4 0 rlineto
+        0 6 moveto
+        0 0 lineto
+    stroke
+    %move to the position of the text
+    0 19 moveto %40-8-13 = 19, y position of the center of the hexagon
+    ccshow %write text centered on
+    grestore
+    
+} def
+
+% Draw an equivalent gate (no specific symbol)
+/SymbolEquiv
+{
+    gsave
+    SetSymbolScale
+    0 dhs neg translate
+    newpath
+        %bottom hook
+        0 0 moveto
+        0 dhs rlineto
+    stroke
+    grestore
+} def
+
+% ------- Event Symbols ---
+% Events symbols are designed to have a bottom connector. 
+% They are defined in a 26x26 size (dwss x dws).
+
+% Draw a transfer symbol (a triangle)
+/SymbolTransfer
+{
+    gsave
+    SetSymbolScale
+    0 dws neg translate
+    newpath
+        0 0 moveto
+        dws2 0 lineto %%Start the triangle bottom right
+        0 dws lineto
+        %continue the left of the triangle
+        dws2 neg 0 lineto
+        closepath
+    stroke
+    grestore
+} def
+
+%Draw a basic Event
+/SymbolBasicEvent
+{
+    gsave
+    SetSymbolScale
+    0 dws neg translate
+    newpath
+        0 dws2 dws2 -90 270 arc
+    stroke
+    grestore
+} def
+
+% Draw an undeveloped event (losange)
+/SymbolUndevEvent
+{
+    gsave
+    SetSymbolScale
+    0 dws neg translate
+    newpath
+        0 0 moveto
+        dws2 dws2 rlineto
+        dws2 neg dws2 rlineto
+        dws2 neg dws2 neg rlineto
+        closepath
+    stroke
+    grestore
+} def
+
+% Draw an undeveloped event (losange)
+/SymbolExternalEvent
+{
+    gsave
+    SetSymbolScale
+    0 dws neg translate
+    newpath
+        0 0 moveto
+        dws2 0 rlineto
+        0 dws2 rlineto
+        dws2 neg dws2 rlineto
+        dws2 neg dws2 neg rlineto
+        0 dws2 neg rlineto
+        closepath
+    stroke
+    grestore
+} def
+
+% Draw the test event symbol (hexagon with circle in the middle)
+/SymbolTestEvent
+{
+    gsave
+    SetSymbolScale
+    0 dws neg translate
+    newpath
+        %start from the top
+        0 dws moveto
+        dws2 dws4 neg rlineto
+        0 dws2 neg rlineto
+        dws2 neg dws4 neg rlineto
+        dws2 neg dws4 rlineto
+        0 dws2 rlineto
+        closepath
+        0 dws4 moveto
+        0 dws2 dws4 -90 270 arc
+    stroke
+    grestore
+} def
+%------------------------------------------------------------------------------
+% Draw a specific gate with the provided symbol at the position x, y (dpi).
+% A gate is the concatenation of a description box and a symbol.
+% Reference point for Gate positioning is the middws2e of the top border.
+% Command:
+%   {symbol} <x> <y> (ref) (description)
+% Inputs:
+%   - {symbol}, procedure to draw the symbol (SymbolNot, SymbolAnd,...)
+%   - x;y, x and y position in dpi.
+%   - (ref), reference of the gate (string).
+%   - (description), description of the gate
+
+/Gate {
+
+    /description exch def
+    /ref exch def
+    /y exch def
+    /x exch def
+    /symbol exch def
+
+    gsave
+    0.4 setlinewidth
+    x y translate %translate to the position of the Gate.
+    % generate the boxes and write the contenyts.
+    ref description DescriptionBox
+
+    % draw the symbol.
+    /height exch def %the height is retrieved from the descriptionBox
+    0 height neg translate %translate where to draw the symbol
+    symbol
+   
+    grestore
+} def
+
+
+{SymbolOr}  14 chr 50 chr (OR_GATE) (This is a OR Gate) Gate
+{SymbolNor}  44 chr 50 chr (NOR_GATE) (This is a NOR Gate) Gate
+{SymbolXor}  74 chr 100 chr (XOR_GATE) (This is a XOR Gate) Gate
+{SymbolNxor}  104 chr 100 chr (NXOR_GATE) (This is a NXOR Gate) Gate
+{SymbolNot} 74 chr 50 chr (NOT_GATE) (This is a NOT gate) Gate
+{SymbolEquiv}  134 chr 50 chr (EQUIV_GATE) (This is an equivalent gate) Gate
+{SymbolAnd}  14 chr 100 chr 
+(AND_GATE) 
+(This is an AND gate with a very long text. \ 
+It should be split on several rows.\
+It possible to write 26 characters by lines.\
+Text is limited to 3 lines.\ 
+But this is not especially true.) Gate
+{SymbolNand}  44 chr 100 chr (NAND_GATE) (This is a NAND gate) Gate
+{(3) SymbolComb} 104 chr 50 chr (COMB_GATE) (This is a 3 combination gate) Gate
+{SymbolOr}  134 chr 100 chr (AND_GATE) (This is an AND gate with a more long text) Gate
+{SymbolTransfer} 14 chr 150 chr (TRANSFER_GATE) (This is a transfer gate.) Gate
+{SymbolBasicEvent} 44 chr 150 chr (BASIC_EVENT) (This is a basic event.) Gate
+{SymbolUndevEvent} 74 chr 150 chr (UNDEV_EVENT) (This is an undeveloped event.) Gate
+{SymbolExternalEvent} 104 chr 150 chr (EXTERNAL_EVENT) (This is an external event.) Gate
+{SymbolTestEvent} 134 chr 150 chr (TEST_EVENT) (This is a test event.) Gate
+showpage
